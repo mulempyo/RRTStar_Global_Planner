@@ -10,15 +10,16 @@
 #include <tf/tf.h>
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.h>
+#include <visualization_msgs/MarkerArray.h>
 
 PLUGINLIB_EXPORT_CLASS(rrt_star::RRTStarPlanner, nav_core::BaseGlobalPlanner)
 
 namespace rrt_star {
 
-RRTStarPlanner::RRTStarPlanner() : initialized_(false), goal_threshold_(0.5), step_size_(0.05), max_iterations_(10000), rewire_radius_(0.5) {}
+RRTStarPlanner::RRTStarPlanner() : initialized_(false), goal_threshold_(0.5), step_size_(0.05), max_iterations_(100000), rewire_radius_(0.1) {}
 
 RRTStarPlanner::RRTStarPlanner(std::string name, costmap_2d::Costmap2DROS* costmap_ros)
-    : initialized_(false), goal_threshold_(0.5), step_size_(0.05), max_iterations_(10000), rewire_radius_(0.5) {
+    : initialized_(false), goal_threshold_(0.5), step_size_(0.05), max_iterations_(100000), rewire_radius_(0.1) {
     initialize(name, costmap_ros);
 }
 
@@ -31,8 +32,10 @@ RRTStarPlanner::~RRTStarPlanner() {
 void RRTStarPlanner::initialize(std::string name, costmap_2d::Costmap2DROS *costmap_ros) {
 
   if (!initialized_) {
+    ROS_WARN("rrt* initialize");
     ros::NodeHandle private_nh("~/" + name);
     plan_pub_ = private_nh.advertise<nav_msgs::Path>("rrt_star_plan",1);
+    tree_pub_ = private_nh.advertise<visualization_msgs::Marker>("rrt_star_tree", 1);
     costmap_ros_ = costmap_ros;
     costmap_ = costmap_ros_->getCostmap();
     origin_x_ = costmap_->getOriginX();
@@ -110,6 +113,7 @@ bool RRTStarPlanner::makePlan(const geometry_msgs::PoseStamped& start, const geo
                 }
             }
         }
+     visualizeTree();
     }
 
     return constructPath(start_index, goal_index, plan);
@@ -119,7 +123,6 @@ void RRTStarPlanner::rewire(unsigned int new_index) {
     double new_x, new_y;
     costmap_->mapToWorld(new_index % width_, new_index / width_, new_x, new_y);
 
-    // Variables to keep track of the closest neighbor
     unsigned int closest_neighbor = new_index;
     double min_cost = std::numeric_limits<double>::max();
 
@@ -130,11 +133,12 @@ void RRTStarPlanner::rewire(unsigned int new_index) {
         double neighbor_x, neighbor_y;
         costmap_->mapToWorld(neighbor_index % width_, neighbor_index / width_, neighbor_x, neighbor_y);
 
-        // Check if the neighbor is within the rewire radius
         if (distance(new_x, new_y, neighbor_x, neighbor_y) <= rewire_radius_) {
             double potential_cost = costs_[new_index] + distance(new_x, new_y, neighbor_x, neighbor_y);
 
-            // Only consider neighbors where the path is valid
+            double obstacle_cost = footprintCost(neighbor_x, neighbor_y, 0.0);
+            potential_cost += obstacle_cost * 10.0; 
+
             if (potential_cost < min_cost && isValidPathBetweenPoses(new_x, new_y, 0.0, neighbor_x, neighbor_y, 0.0)) {
                 closest_neighbor = neighbor_index;
                 min_cost = potential_cost;
@@ -142,11 +146,8 @@ void RRTStarPlanner::rewire(unsigned int new_index) {
         }
     }
 
-    // If a closest neighbor is found, rewire to it
     if (closest_neighbor != new_index) {
         costs_[closest_neighbor] = min_cost;
-
-        // Update the tree structure to set the new parent
         auto it = std::find_if(tree_.begin(), tree_.end(), [closest_neighbor](const std::pair<unsigned int, unsigned int>& node) {
             return node.first == closest_neighbor;
         });
@@ -155,7 +156,6 @@ void RRTStarPlanner::rewire(unsigned int new_index) {
         }
     }
 }
-
 
 bool RRTStarPlanner::constructPath(unsigned int start_index, unsigned int goal_index, std::vector<geometry_msgs::PoseStamped>& plan) {
     if (costs_.find(goal_index) == costs_.end()) {
@@ -210,64 +210,106 @@ double RRTStarPlanner::footprintCost(double x, double y, double th) const {
 }
 
 bool RRTStarPlanner::isValidPose(double x, double y, double th) const {
-  double footprint_cost = footprintCost(x, y, th);
-  if ((footprint_cost < 0) || (footprint_cost > 128)) {
-    return false;
-  }
-  return true;
+    double footprint_cost = footprintCost(x, y, th);
+    
+    double obstacle_radius = 0.3;  
+    unsigned int mx, my;
+    if (costmap_->worldToMap(x, y, mx, my)) {
+        for (int dx = -3; dx <= 3; ++dx) {
+            for (int dy = -3; dy <= 3; ++dy) {
+                unsigned int nx = mx + dx;
+                unsigned int ny = my + dy;
+                if (nx < 0 || ny < 0 || nx >= width_ || ny >= height_) continue;
+                if (costmap_->getCost(nx, ny) > 128) {
+                    return false;  
+                }
+            }
+        }
+    }
+
+    return (footprint_cost >= 0 && footprint_cost <= 128);
 }
 
 void RRTStarPlanner::createRandomValidPose(double &x, double &y, double &th) const {
-  // get bounds of the costmap in world coordinates
-  double wx_min, wy_min;
-  costmap_->mapToWorld(0, 0, wx_min, wy_min);
+    double wx_min, wy_min;
+    costmap_->mapToWorld(0, 0, wx_min, wy_min);
 
-  double wx_max, wy_max;
-  unsigned int mx_max = costmap_->getSizeInCellsX();
-  unsigned int my_max = costmap_->getSizeInCellsY();
-  costmap_->mapToWorld(mx_max, my_max, wx_max, wy_max);
+    double wx_max, wy_max;
+    unsigned int mx_max = costmap_->getSizeInCellsX();
+    unsigned int my_max = costmap_->getSizeInCellsY();
+    costmap_->mapToWorld(mx_max, my_max, wx_max, wy_max);
 
-  bool found_pose = false;
+    bool found_pose = false;
 
-  std::random_device rd;
-  std::mt19937 gen(rd());
-  std::uniform_real_distribution<> dis(0.0, 1.0);
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_real_distribution<> dis(0.0, 1.0);
 
-  while (!found_pose) {
-    double wx_rand = dis(gen);
-    wx_rand = wx_min + wx_rand * (wx_max - wx_min);
+    int max_attempts = 100;  
+    int attempts = 0;
 
-    double wy_rand = dis(gen);
-    wy_rand = wy_min + wy_rand * (wy_max - wy_min);
+    while (!found_pose && attempts < max_attempts) {
+        double wx_rand = wx_min + dis(gen) * (wx_max - wx_min);
+        double wy_rand = wy_min + dis(gen) * (wy_max - wy_min);
+        double th_rand = -M_PI + dis(gen) * (2.0 * M_PI);
 
-    double th_rand = dis(gen);
-    th_rand = -M_PI + th_rand * (M_PI - -M_PI);
+        if (isValidPose(wx_rand, wy_rand, th_rand)) {
+            x = wx_rand;
+            y = wy_rand;
+            th = th_rand;
+            found_pose = true;
+        }
 
-    if (isValidPose(wx_rand, wy_rand, th_rand)) {
-      x = wx_rand;
-      y = wy_rand;
-      th = th_rand;
-      found_pose = true;
+        attempts++;
     }
-  }
+
+    if (!found_pose) {
+        ROS_WARN("Failed to find a valid pose after %d attempts. Returning last sample.", max_attempts);
+    }
 }
 
 unsigned int RRTStarPlanner::nearestNode(double random_x, double random_y) {
-  unsigned int nearest_index = 0;
-  double min_dist = std::numeric_limits<double>::max();
+    unsigned int nearest_index = 0;
+    double min_cost = std::numeric_limits<double>::max();
+    double min_dist = std::numeric_limits<double>::max();
 
-  for (const auto &node : tree_) {
-    unsigned int node_index = node.first;
-    double node_x,node_y;
-    costmap_->mapToWorld(node_index % width_,node_index / width_,node_x,node_y);
-    double dist = distance(node_x, node_y, random_x, random_y);
-    ROS_INFO("tree node:%d -> %d", node.first, node.second);
-    if (dist < min_dist && dist > 0.001) { 
-      min_dist = dist;
-      nearest_index = node_index;
+    for (const auto& node : tree_) {
+        unsigned int node_index = node.first;
+        double node_x, node_y;
+        costmap_->mapToWorld(node_index % width_, node_index / width_, node_x, node_y);
+
+        double dist = distance(node_x, node_y, random_x, random_y);
+
+        // Check if the node is within rewire_radius_
+        if (dist <= rewire_radius_ && dist > 0.001) {
+            double node_cost = costs_[node_index]; // Retrieve the cost of the current node
+
+            // Choose the node with the smallest cost within the radius
+            if (node_cost < min_cost || (node_cost == min_cost && dist < min_dist)) {
+                min_cost = node_cost;
+                min_dist = dist;
+                nearest_index = node_index;
+            }
+        }
     }
-  }
-  return nearest_index;
+
+    // If no node is found within the radius, fallback to the globally nearest node
+    if (nearest_index == 0) {
+        for (const auto& node : tree_) {
+            unsigned int node_index = node.first;
+            double node_x, node_y;
+            costmap_->mapToWorld(node_index % width_, node_index / width_, node_x, node_y);
+
+            double dist = distance(node_x, node_y, random_x, random_y);
+
+            if (dist < min_dist && dist > 0.001) {
+                min_dist = dist;
+                nearest_index = node_index;
+            }
+        }
+    }
+
+    return nearest_index;
 }
 
 void RRTStarPlanner::createPoseWithinRange(double start_x, double start_y, double start_th,
@@ -294,24 +336,87 @@ void RRTStarPlanner::createPoseWithinRange(double start_x, double start_y, doubl
 }
 
 bool RRTStarPlanner::isValidPathBetweenPoses(double x1, double y1, double th1,
-                                         double x2, double y2, double th2) const {
-  double interp_step_size = 0.05;
-  double current_step = interp_step_size;
+                                             double x2, double y2, double th2) const {
+    double interp_step_size = 0.05; 
+    double current_step = interp_step_size;
+    double d = std::hypot(x2 - x1, y2 - y1);
 
-  double d = std::hypot(x2 - x1, y2 - y1);
+    while (current_step < d) {
+        double interp_x, interp_y, interp_th;
+        createPoseWithinRange(x1, y1, th1, x2, y2, th2, current_step,
+                              interp_x, interp_y, interp_th);
 
-  while (current_step < d) {
-    double interp_x, interp_y, interp_th;
-    createPoseWithinRange(x1, y1, th1, x2, y2, th2, current_step,
-                          interp_x, interp_y, interp_th);
+        if (!isValidPose(interp_x, interp_y, interp_th)) {
+            return false; 
+        }
 
-    if (!isValidPose(interp_x, interp_y, interp_th)) return false;
+        current_step += interp_step_size;
+    }
 
-    current_step += interp_step_size;
-  }
-
-  return true;
+    return true;
 }
+
+bool RRTStarPlanner::isWithinMapBounds(double x, double y) const {
+    unsigned int mx, my;
+    if (!costmap_->worldToMap(x, y, mx, my)) {
+        return false;
+    }
+    return true;
+}
+
+void RRTStarPlanner::visualizeTree() const {
+    if (!initialized_) {
+        ROS_WARN("RRTPlanner has not been initialized.");
+        return;
+    }
+
+    visualization_msgs::Marker tree_marker;
+    tree_marker.header.frame_id = costmap_ros_->getGlobalFrameID();
+    tree_marker.header.stamp = ros::Time::now();
+    tree_marker.ns = "rrt_star_tree";
+    tree_marker.id = 0;
+    tree_marker.type = visualization_msgs::Marker::LINE_LIST;
+    tree_marker.action = visualization_msgs::Marker::ADD;
+    tree_marker.scale.x = 0.02;  // Line thickness
+    tree_marker.color.r = 0.0;
+    tree_marker.color.g = 0.8;
+    tree_marker.color.b = 0.2;
+    tree_marker.color.a = 1.0;   // Fully opaque
+
+    tree_marker.pose.orientation.x = 0.0;
+    tree_marker.pose.orientation.y = 0.0;
+    tree_marker.pose.orientation.z = 0.0;
+    tree_marker.pose.orientation.w = 1.0;
+    // Add lines for each edge in the tree
+    for (const auto& edge : tree_) {
+        unsigned int parent_index = edge.second;
+        unsigned int child_index = edge.first;
+
+        double parent_x, parent_y, child_x, child_y;
+        costmap_->mapToWorld(parent_index % width_, parent_index / width_, parent_x, parent_y);
+        costmap_->mapToWorld(child_index % width_, child_index / width_, child_x, child_y);
+
+        // Only add nodes that are within map bounds
+        if (isWithinMapBounds(parent_x, parent_y) && isWithinMapBounds(child_x, child_y)) {
+            geometry_msgs::Point parent_point, child_point;
+            parent_point.x = parent_x;
+            parent_point.y = parent_y;
+            parent_point.z = 0.0;
+
+            child_point.x = child_x;
+            child_point.y = child_y;
+            child_point.z = 0.0;
+
+            tree_marker.points.push_back(parent_point);
+            tree_marker.points.push_back(child_point);
+        }
+    }
+
+    // Publish the tree visualization
+    tree_pub_.publish(tree_marker);
+}
+
+
 
 void RRTStarPlanner::publishPlan(const std::vector<geometry_msgs::PoseStamped> &path) const {
   if (!initialized_) {
@@ -323,7 +428,7 @@ void RRTStarPlanner::publishPlan(const std::vector<geometry_msgs::PoseStamped> &
 
   nav_msgs::Path path_visual;
   path_visual.poses.resize(path.size());
-  ROS_INFO("path size: %f",path.size());
+  //ROS_INFO("path size: %f",path.size());
 
   if (path.empty()) {
     path_visual.header.frame_id = costmap_ros_->getGlobalFrameID();
@@ -353,5 +458,3 @@ void RRTStarPlanner::mapToWorld(unsigned int mx, unsigned int my, double &wx, do
 
 
 };  // namespace rrt_star
-
-    
