@@ -46,7 +46,7 @@ void RRTStarPlanner::initialize(std::string name, costmap_2d::Costmap2DROS *cost
     world_model_ = new base_local_planner::CostmapModel(*costmap_);
     initialized_ = true;
   } else {
-    ROS_WARN("RRTPlanner has already been initialized.");
+    ROS_WARN("RRTstarPlanner has already been initialized.");
   }
 }
 
@@ -96,9 +96,13 @@ bool RRTStarPlanner::makePlan(const geometry_msgs::PoseStamped& start, const geo
         createPoseWithinRange(nearest_x, nearest_y, 0.0, random_x, random_y, random_th, step_size_, new_x, new_y, new_th);
 
         if (isValidPathBetweenPoses(nearest_x, nearest_y, 0.0, new_x, new_y, 0.0)) {
-            unsigned int new_x_int, new_y_int;
-            costmap_->worldToMap(new_x, new_y, new_x_int, new_y_int);
-            unsigned int new_index = new_y_int * width_ + new_x_int;
+            unsigned int new_x_int, new_y_int, new_index, cost;
+
+            if(isValidPose(new_x,new_y)){
+             costmap_->worldToMap(new_x, new_y, new_x_int, new_y_int);
+             cost = costmap_->getCost(new_x_int, new_y_int);
+             new_index = new_y_int * width_ + new_x_int;
+            }
 
             if (costs_.find(new_index) == costs_.end()) {
                 tree_.emplace_back(new_index, nearest_index);
@@ -133,7 +137,7 @@ void RRTStarPlanner::rewire(unsigned int new_index) {
         double neighbor_x, neighbor_y;
         costmap_->mapToWorld(neighbor_index % width_, neighbor_index / width_, neighbor_x, neighbor_y);
 
-        if (distance(new_x, new_y, neighbor_x, neighbor_y) <= rewire_radius_) {
+        if (distance(new_x, new_y, neighbor_x, neighbor_y) <= rewire_radius_ && isValidPose(new_x, new_y) && isValidPose(neighbor_x, neighbor_y)) {
             double potential_cost = costs_[new_index] + distance(new_x, new_y, neighbor_x, neighbor_y);
 
             double obstacle_cost = footprintCost(neighbor_x, neighbor_y, 0.0);
@@ -196,7 +200,7 @@ bool RRTStarPlanner::constructPath(unsigned int start_index, unsigned int goal_i
 
 double RRTStarPlanner::footprintCost(double x, double y, double th) const {
   if (!initialized_) {
-    ROS_ERROR("The RRT Planner has not been initialized, you must call initialize().");
+    ROS_ERROR("The RRTstarPlanner has not been initialized, you must call initialize().");
     return -1.0;
   }
 
@@ -210,24 +214,35 @@ double RRTStarPlanner::footprintCost(double x, double y, double th) const {
 }
 
 bool RRTStarPlanner::isValidPose(double x, double y, double th) const {
-    double footprint_cost = footprintCost(x, y, th);
+  double footprint_cost = footprintCost(x, y, th);
+
+  if ((footprint_cost < 0) || (footprint_cost > 128)) {
+    return false;
+  }
+  return true;
+}
+
+bool RRTStarPlanner::isValidPose(double x, double y) const {
     
     double obstacle_radius = 0.3;  
-    unsigned int mx, my;
+    unsigned int mx, my, cost;
     if (costmap_->worldToMap(x, y, mx, my)) {
         for (int dx = -3; dx <= 3; ++dx) {
             for (int dy = -3; dy <= 3; ++dy) {
                 unsigned int nx = mx + dx;
                 unsigned int ny = my + dy;
                 if (nx < 0 || ny < 0 || nx >= width_ || ny >= height_) continue;
-                if (costmap_->getCost(nx, ny) > 128) {
+                cost = costmap_->getCost(nx, ny);
+                if (cost > 128) {
                     return false;  
                 }
             }
         }
     }
 
-    return (footprint_cost >= 0 && footprint_cost <= 128);
+    if(cost == costmap_2d::FREE_SPACE){
+      return true;
+    }
 }
 
 void RRTStarPlanner::createRandomValidPose(double &x, double &y, double &th) const {
@@ -253,7 +268,7 @@ void RRTStarPlanner::createRandomValidPose(double &x, double &y, double &th) con
         double wy_rand = wy_min + dis(gen) * (wy_max - wy_min);
         double th_rand = -M_PI + dis(gen) * (2.0 * M_PI);
 
-        if (isValidPose(wx_rand, wy_rand, th_rand)) {
+        if (isValidPose(wx_rand, wy_rand, th_rand) && isValidPose(wx_rand, wy_rand)) {
             x = wx_rand;
             y = wy_rand;
             th = th_rand;
@@ -281,14 +296,18 @@ unsigned int RRTStarPlanner::nearestNode(double random_x, double random_y) {
         double dist = distance(node_x, node_y, random_x, random_y);
 
         // Check if the node is within rewire_radius_
-        if (dist <= rewire_radius_ && dist > 0.001) {
+        if (dist <= rewire_radius_ && dist > 0.001 && isValidPose(node_x, node_y) && isValidPose(random_x, random_y)) {
             double node_cost = costs_[node_index]; // Retrieve the cost of the current node
 
             // Choose the node with the smallest cost within the radius
-            if (node_cost < min_cost || (node_cost == min_cost && dist < min_dist)) {
+            if (node_cost < min_cost || (node_cost == min_cost && dist < min_dist)){
+            if(isValidPose(node_x, node_y) && isValidPose(random_x, random_y)){
                 min_cost = node_cost;
                 min_dist = dist;
                 nearest_index = node_index;
+              }else{
+                continue;
+              }
             }
         }
     }
@@ -302,9 +321,13 @@ unsigned int RRTStarPlanner::nearestNode(double random_x, double random_y) {
 
             double dist = distance(node_x, node_y, random_x, random_y);
 
-            if (dist < min_dist && dist > 0.001) {
-                min_dist = dist;
-                nearest_index = node_index;
+            if (dist < min_dist && dist > 0.001){
+                if(isValidPose(node_x, node_y)) {
+                 min_dist = dist;
+                 nearest_index = node_index;
+                }else{
+                    continue;
+                }
             }
         }
     }
@@ -320,6 +343,8 @@ void RRTStarPlanner::createPoseWithinRange(double start_x, double start_y, doubl
   double y_step = end_y - start_y;
   double mag = sqrt((x_step * x_step) + (y_step * y_step));
 
+  double newX, newY, newTh;
+
   if (mag < 0.001) {
     new_x = end_x;
     new_y = end_y;
@@ -330,9 +355,15 @@ void RRTStarPlanner::createPoseWithinRange(double start_x, double start_y, doubl
   x_step /= mag;
   y_step /= mag;
 
-  new_x = start_x + x_step * range;
-  new_y = start_y + y_step * range;
-  new_th = start_th;
+  newX = start_x + x_step * range;
+  newY = start_y + y_step * range;
+  newTh = start_th;
+
+  if(isValidPose(newX, newY)){
+    new_x = newX;
+    new_y = newY;
+    new_th = newTh;
+  }
 }
 
 bool RRTStarPlanner::isValidPathBetweenPoses(double x1, double y1, double th1,
@@ -350,7 +381,9 @@ bool RRTStarPlanner::isValidPathBetweenPoses(double x1, double y1, double th1,
             return false; 
         }
 
+        
         current_step += interp_step_size;
+        
     }
 
     return true;
@@ -366,7 +399,7 @@ bool RRTStarPlanner::isWithinMapBounds(double x, double y) const {
 
 void RRTStarPlanner::visualizeTree() const {
     if (!initialized_) {
-        ROS_WARN("RRTPlanner has not been initialized.");
+        ROS_WARN("RRTstarPlanner has not been initialized.");
         return;
     }
 
@@ -421,7 +454,7 @@ void RRTStarPlanner::visualizeTree() const {
 void RRTStarPlanner::publishPlan(const std::vector<geometry_msgs::PoseStamped> &path) const {
   if (!initialized_) {
     ROS_ERROR(
-        "The RRT Planner has not been initialized, you must call "
+        "The RRTstarPlanner has not been initialized, you must call "
         "initialize().");
     return;
   }

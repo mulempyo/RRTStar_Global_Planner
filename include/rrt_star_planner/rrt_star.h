@@ -30,6 +30,7 @@ private:
     void rewire(unsigned int new_index);
     bool constructPath(unsigned int start_index, unsigned int goal_index, std::vector<geometry_msgs::PoseStamped>& plan);
     double footprintCost(double x, double y, double th) const;
+    bool isValidPose(double x, double y) const;
     bool isValidPose(double x, double y, double th) const;
     void createRandomValidPose(double &x, double &y, double &th) const;
     unsigned int nearestNode(double random_x, double random_y);
