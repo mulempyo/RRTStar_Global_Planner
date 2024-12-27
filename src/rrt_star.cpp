@@ -285,58 +285,81 @@ void RRTStarPlanner::createRandomValidPose(double &x, double &y, double &th) con
 }
 
 unsigned int RRTStarPlanner::nearestNode(double random_x, double random_y) {
-    unsigned int nearest_index = 0;
-    double min_cost = std::numeric_limits<double>::max();
-    double min_dist = std::numeric_limits<double>::max();
+    // rewire_radius_ 내에 들어온 노드를 후보로 모으고,
+    // 후보 중에서 costs_가 가장 낮은 노드를 선택한다.
+    // 만약 후보가 하나도 없다면, 기존처럼 "글로벌로 가장 가까운 노드"를 반환한다.
 
+    // 1) 전역적으로 "가장 가까운 노드" (fallback 용)
+    unsigned int global_nearest_index = 0;
+    double global_min_dist = std::numeric_limits<double>::max();
+
+    // 2) rewire_radius_ 이내의 '후보'들을 담아둘 벡터
+    //    (node_index, dist)의 쌍을 저장
+    std::vector<std::pair<unsigned int, double>> candidates;
+
+    // 트리(노드 목록) 순회
     for (const auto& node : tree_) {
         unsigned int node_index = node.first;
+
         double node_x, node_y;
         costmap_->mapToWorld(node_index % width_, node_index / width_, node_x, node_y);
 
+        // 랜덤 포인트까지의 거리 계산
         double dist = distance(node_x, node_y, random_x, random_y);
 
-        // Check if the node is within rewire_radius_
-        if (dist <= rewire_radius_ && dist > 0.001 && isValidPose(node_x, node_y) && isValidPose(random_x, random_y)
-            && isWithinMapBounds(node_x, node_y) && isWithinMapBounds(random_x, random_y)) {
-            double node_cost = costs_[node_index]; // Retrieve the cost of the current node
+        // (A) 전역(글로벌)으로 가장 가까운 노드 갱신 (fallback 대비)
+        if (dist < global_min_dist && dist > 0.001) {
+            if (isValidPose(node_x, node_y) && isWithinMapBounds(node_x, node_y)) {
+                global_min_dist = dist;
+                global_nearest_index = node_index;
+            }
+        }
 
-            // Choose the node with the smallest cost within the radius
-            if (node_cost < min_cost || (node_cost == min_cost && dist < min_dist)){
-            if(isValidPose(node_x, node_y) && isValidPose(random_x, random_y) 
-               && isWithinMapBounds(node_x, node_y) && isWithinMapBounds(random_x, random_y)){
-                min_cost = node_cost;
-                min_dist = dist;
-                nearest_index = node_index;
-              }else{
-                continue;
-              }
+        // (B) rewire_radius_ 범위 이내인 경우 -> 후보군에 추가
+        if (dist <= rewire_radius_ && dist > 0.001) {
+            // 후보로 추가하기 전에 node_x,node_y가 유효한지 검사
+            if (isValidPose(node_x, node_y) && isValidPose(random_x, random_y) &&
+                isWithinMapBounds(node_x, node_y) && isWithinMapBounds(random_x, random_y)) {
+                
+                candidates.emplace_back(node_index, dist);
             }
         }
     }
 
-    // If no node is found within the radius, fallback to the globally nearest node
-    if (nearest_index == 0) {
-        for (const auto& node : tree_) {
-            unsigned int node_index = node.first;
-            double node_x, node_y;
-            costmap_->mapToWorld(node_index % width_, node_index / width_, node_x, node_y);
+    // 3) 만약 후보가 비어 있으면 (즉, rewire_radius_ 내부에 아무 노드가 없다면)
+    //    전역으로 가장 가까운 노드를 반환
+    if (candidates.empty()) {
+        return global_nearest_index;
+    }
 
-            double dist = distance(node_x, node_y, random_x, random_y);
+    // 4) 후보 중에서 costs_ 가 가장 낮은 노드를 찾되,
+    //    costs_ 가 같다면 dist가 더 작은 노드를 택한다.
+    unsigned int best_index = 0;
+    double best_cost = std::numeric_limits<double>::max();
+    double best_dist = std::numeric_limits<double>::max();
 
-            if (dist < min_dist && dist > 0.001){
-                if(isValidPose(node_x, node_y) && isWithinMapBounds(node_x, node_y)) {
-                 min_dist = dist;
-                 nearest_index = node_index;
-                }else{
-                    continue;
-                }
-            }
+    for (const auto& c : candidates) {
+        unsigned int cand_index = c.first;
+        double cand_dist = c.second;
+        
+        // 현재 노드의 코스트 (RRT* 구현부에 따르면 costs_[node_index]는
+        // start 노드로부터 그 노드까지의 경로 비용을 의미)
+        double cand_cost = costs_[cand_index];
+
+        // 비용이 더 낮은 노드를 우선
+        // 비용이 동일하면 dist가 더 작은 쪽
+        if ((cand_cost < best_cost) ||
+            (std::fabs(cand_cost - best_cost) < 1e-9 && cand_dist < best_dist))
+        {
+            best_cost = cand_cost;
+            best_dist = cand_dist;
+            best_index = cand_index;
         }
     }
 
-    return nearest_index;
+    return best_index;
 }
+
 
 void RRTStarPlanner::createPoseWithinRange(double start_x, double start_y, double start_th,
                                        double end_x, double end_y, double end_th,
