@@ -16,10 +16,10 @@ PLUGINLIB_EXPORT_CLASS(rrt_star::RRTStarPlanner, nav_core::BaseGlobalPlanner)
 
 namespace rrt_star {
 
-RRTStarPlanner::RRTStarPlanner() : initialized_(false), goal_threshold_(0.5), step_size_(0.05), max_iterations_(100000), rewire_radius_(0.1) {}
+RRTStarPlanner::RRTStarPlanner() : initialized_(false), goal_threshold_(0.5), step_size_(0.05), max_iterations_(100000), rewire_radius_(0.05) {}
 
 RRTStarPlanner::RRTStarPlanner(std::string name, costmap_2d::Costmap2DROS* costmap_ros)
-    : initialized_(false), goal_threshold_(0.5), step_size_(0.05), max_iterations_(100000), rewire_radius_(0.1) {
+    : initialized_(false), goal_threshold_(0.5), step_size_(0.05), max_iterations_(100000), rewire_radius_(0.05) {
     initialize(name, costmap_ros);
 }
 
@@ -137,7 +137,8 @@ void RRTStarPlanner::rewire(unsigned int new_index) {
         double neighbor_x, neighbor_y;
         costmap_->mapToWorld(neighbor_index % width_, neighbor_index / width_, neighbor_x, neighbor_y);
 
-        if (distance(new_x, new_y, neighbor_x, neighbor_y) <= rewire_radius_ && isValidPose(new_x, new_y) && isValidPose(neighbor_x, neighbor_y)) {
+        if (distance(new_x, new_y, neighbor_x, neighbor_y) <= rewire_radius_ && isValidPose(new_x, new_y) && isValidPose(neighbor_x, neighbor_y)
+            && isWithinMapBounds(new_x, new_y) && isWithinMapBounds(neighbor_x, neighbor_y)) {
             double potential_cost = costs_[new_index] + distance(new_x, new_y, neighbor_x, neighbor_y);
 
             double obstacle_cost = footprintCost(neighbor_x, neighbor_y, 0.0);
@@ -296,12 +297,14 @@ unsigned int RRTStarPlanner::nearestNode(double random_x, double random_y) {
         double dist = distance(node_x, node_y, random_x, random_y);
 
         // Check if the node is within rewire_radius_
-        if (dist <= rewire_radius_ && dist > 0.001 && isValidPose(node_x, node_y) && isValidPose(random_x, random_y)) {
+        if (dist <= rewire_radius_ && dist > 0.001 && isValidPose(node_x, node_y) && isValidPose(random_x, random_y)
+            && isWithinMapBounds(node_x, node_y) && isWithinMapBounds(random_x, random_y)) {
             double node_cost = costs_[node_index]; // Retrieve the cost of the current node
 
             // Choose the node with the smallest cost within the radius
             if (node_cost < min_cost || (node_cost == min_cost && dist < min_dist)){
-            if(isValidPose(node_x, node_y) && isValidPose(random_x, random_y)){
+            if(isValidPose(node_x, node_y) && isValidPose(random_x, random_y) 
+               && isWithinMapBounds(node_x, node_y) && isWithinMapBounds(random_x, random_y)){
                 min_cost = node_cost;
                 min_dist = dist;
                 nearest_index = node_index;
@@ -322,7 +325,7 @@ unsigned int RRTStarPlanner::nearestNode(double random_x, double random_y) {
             double dist = distance(node_x, node_y, random_x, random_y);
 
             if (dist < min_dist && dist > 0.001){
-                if(isValidPose(node_x, node_y)) {
+                if(isValidPose(node_x, node_y) && isWithinMapBounds(node_x, node_y)) {
                  min_dist = dist;
                  nearest_index = node_index;
                 }else{
